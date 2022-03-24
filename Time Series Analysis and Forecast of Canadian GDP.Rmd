@@ -1,0 +1,227 @@
+---
+title: "Time Series Analysis and Prediction"
+author: "Tianze Hua"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+editor_options:
+  chunk_output_type: inline
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, fig.width=7, fig.height=5)
+```
+
+#### Description
+
+The goal is to fit a model for predicting "current" GDP, call it $Y_t$, based on current and lagged values of the other variables (e.g. $X_{1,t}, X_{1,t-1}, X_{2,t}$) and possibly lagged values of GDP ($Y_{t-1}$). For this, you will use VAR and regression with ARMA error models. 
+
+**Note: Most economic time-series are integrated of order 1, so you might need to difference the data**
+
+
+
+1. Plot of the (nominal) GDP series and perform an `adf.test` for stationarity. Report the p-value and the conclusion for your series (integrated or stationary).
+
+```{r}
+library(cansim)
+library(tidyverse)
+
+# Data for Agriculture, forestry, fishing and hunting; Canada
+# Gross domestic product (GDP) (dollars x 1,000,000) 
+gdp = get_cansim_vector( "v41713154", start_time = "1961-01-01", end_time = "2016-12-01") %>% 
+  pull(VALUE) %>% ts( start = c(1961,1), frequency = 1)
+
+plot(gdp)
+
+tseries::adf.test(gdp)
+```
+
+The GDP series looks like a RW, and this is confirmed by the ADF test, which fails to reject the null hypothesis of non-stationarity with a p-value close to 1. 
+
+2. Fit a bivariate VAR(1) model on (nominal) GDP and Real GDP. Do not transform the series, but include both constant and trend term in your model. Report the coefficient matrix and check whether the model is stationary, i.e. its eigen-values are within the unit disk (use functions `eigen` and `Mod`).  
+
+```{r}
+# Real gross domestic product (GDP)
+rgdp = get_cansim_vector( "v41712933", start_time = "1961-01-01", end_time = "2016-12-01") %>% 
+  pull(VALUE) %>% ts( start = c(1961,1), frequency = 1)
+
+X = cbind( gdp, rgdp)
+plot(X)
+
+library(vars)
+out.var = VAR( X, lag.max = 1, type = "both" )
+summary(out.var)
+```
+
+The model is 
+$$
+\begin{bmatrix} GDP_{t} \\ rGDP_{t} \end{bmatrix} = 
+\overbrace{ \begin{bmatrix} -15.9815 \\ 12.4294006 \end{bmatrix} }^{const} +
+\overbrace{ \begin{bmatrix} 132.6801 \\ -0.0263425 \end{bmatrix} }^{trend} +
+\begin{bmatrix} 0.7811  & -0.3129  \\ 0.0006334 &  0.7401645   \end{bmatrix} 
+\begin{bmatrix} GDP_{t-1} \\ rGDP_{t-1} \end{bmatrix} +
+\begin{bmatrix} W_{1,t} \\ W_{2,t} \end{bmatrix} \\
+\begin{bmatrix} W_{1,t} \\ W_{2,t} \end{bmatrix} \sim \mathrm{N}\left( 
+\begin{bmatrix} 0 \\ 0 \end{bmatrix} ,
+\begin{bmatrix}  2701346 & 3928.41 \\ 3928.41  & 24.53 \end{bmatrix} 
+\right)
+$$
+
+
+To check for stationarity:
+```{r}
+(Phi = matrix( c( out.var$varresult$gdp$coefficients[1:2], 
+                  out.var$varresult$rgdp$coefficients[1:2]
+                  ), 2, byrow = T))
+(eigen_vals = eigen(Phi)$values)
+(Mod(eigen_vals) < 1)
+```
+Since both eigen-values of the $\boldsymbol \Phi_1$ matrix are less than one, the model is stationary.
+
+3. Plot the residuals and their ACF/CCF from the previous VAR(1) model, and comment on its fit. Report the residual [MAPE](https://en.wikipedia.org/wiki/Mean_absolute_percentage_error) for (nominal) GDP only.
+
+
+```{r}
+R = ts( residuals(out.var) )
+plot(R)
+acf(R)
+# Can also perform a Ljung-Box type test, with 
+vars::serial.test(out.var, lags.pt = 10)
+```
+
+The residuals for nominal GDP do not look stationary, as their variance is fanning out. This is an indication that a log-transformation is necessary (i.e. model log-differences, or continuously compounded increase rates). The residuals seem generally uncorrelated.
+
+The MAPE for nominal GDP is 
+```{r}
+mean( abs(gdp[-1] - fitted(out.var)[,1]) / gdp[-1] )
+```
+
+
+4. Now fit an ARMA-error regression model for (nominal) GDP ($Y_t$) with simultaneous Real GDP ($X_t$) as the external regressor. Use `forecast::auto.arima` to select the order of the model (including differencing) and report the final model, its AIC and MAPE. 
+
+```{r}
+library(forecast)
+out.arimax = auto.arima( gdp, xreg = rgdp) 
+summary(out.arimax)
+```
+
+The fitted model is 
+$$ (1 + 0.0554B + 0.4499B^2) \nabla ( GDP_t - 382.2726 t - 169.4405 rGDP_t) = W_t   $$
+with $AIC=960.92$ and $MAPE = 10.07983%$
+
+An alternative approach would be to model the log-GDP.
+```{r}
+lgdp = log(gdp)
+out.log.arimax = auto.arima(lgdp , xreg = rgdp)
+summary(out.log.arimax)
+```
+
+Note that the AIC is not comparable because of the transformation, but we can compare MAPE's for the original data. 
+```{r}
+mean( abs( gdp - exp( fitted(out.log.arimax) ) ) / gdp )
+```
+The log-model gives a MAPE of 7.01%, which is better than the previous model's.
+
+5. Finally, fit an ARMA-error regression model for (nominal) GDP with any of the other variables (Real GDP, Labour/Capital productivity/input/cost, etc.) as external regressors, simultaneous or lagged. Find a model that gives a better AIC than the previous part, or report three different models that you tried with worse AIC. Report the best-AIC model's MAPE and plot its diagnostics, commenting briefly on its fit. 
+
+Consider the additional external variables:
+```{r}
+# Multifactor productivity 
+mfp = get_cansim_vector( "v41712882", start_time = "1961-01-01", end_time = "2016-12-01") %>% 
+  pull(VALUE) %>% ts( start = c(1961,1), frequency = 1)
+# Labour input
+lin = get_cansim_vector( "v41712950", start_time = "1961-01-01", end_time = "2016-12-01") %>% 
+  pull(VALUE) %>% ts( start = c(1961,1), frequency = 1)
+# Capital input
+cin = get_cansim_vector( "v41713052", start_time = "1961-01-01", end_time = "2016-12-01") %>% 
+  pull(VALUE) %>% ts( start = c(1961,1), frequency = 1)
+# Combined labour and capital inputs
+clcin = get_cansim_vector( "v41713137", start_time = "1961-01-01", end_time = "2016-12-01") %>% 
+  pull(VALUE) %>% ts( start = c(1961,1), frequency = 1)
+```
+
+Trying out  different models on the raw data, we get:
+
+```{r}
+auto.arima( gdp, xreg = mfp) %>% AIC
+auto.arima( gdp, xreg = lin) %>% AIC
+auto.arima( gdp, xreg = cin) %>% AIC
+auto.arima( gdp, xreg = clcin) %>% AIC
+auto.arima( gdp, xreg = cbind(rgdp)) %>% AIC
+```
+
+The best model seems to be the one with only Capital Input as an external regressor, giving a MAPE of 7.78%. 
+
+```{r}
+out.arimax.best = auto.arima( gdp, xreg = cin) 
+summary(out.arimax.best)
+```
+
+Considering the log-transformed data
+```{r}
+auto.arima( lgdp, xreg = mfp) %>% AIC
+auto.arima( lgdp, xreg = lin) %>% AIC
+auto.arima( lgdp, xreg = cin) %>% AIC
+auto.arima( lgdp, xreg = clcin) %>% AIC
+auto.arima( lgdp, xreg = cbind(clcin, rgdp)) %>% AIC
+```
+
+The best model includes Combined Labour & Capital Input and Real GDP as regressors, and also includes a drift term.
+
+```{r}
+out.log.arimax.best = auto.arima( lgdp, xreg = cbind(clcin,rgdp))
+summary(out.log.arimax.best)
+```
+
+Note this is a simple regression model on the differenced series. It's MAPE in terms of the original data is 6.7%:
+
+```{r}
+mean( abs( gdp - exp( fitted(out.log.arimax.best) ) ) / gdp )
+```
+
+
+
+6. The in-sample MAPE used above is a biased measure of predictive performance. A better measure is given by using time series cross-validation, [as described in chapter 3.4 of fpp2](https://otexts.com/fpp2/accuracy.html). For this part, you have to evaluate the predictive performance of your previous model using TS cross-validation on the last 10 available GDP values. More specifically, create a loop for $i=1,\ldots,10$ and do the following:
++  Fit the model specification you chose in the previous part to the data from $1961$ to $2006+i=n_i$.
++  Use the model to create a 1-step-ahead forecast for (nominal) GDP, call it $Y_{n_i+1}^{n_i}$; make sure to use the appropriate regressor values for $newxreg$.
++  Calculate the percentage error: $|Y_{n_i+1} - Y_{n_i+1}^{n_i}|/Y_{n_i+1}$  
+In the end, average the percentage errors over all $i$ and report the resulting MAPE value.  
+(Note: this will give you a more objective measure of predictive performance, because you are only using  *out-of-sample* 1-step-ahead forecasts.)
+
+
+Using the model for the log-GDP
+
+```{r}
+n = length(lgdp)
+Xreg = cbind( clcin, rgdp)
+
+CV.fit = rep(0,10) # placeholder for cross-validation forecasts
+
+for(i in 1:10){
+  # create increasing series
+  lgdp.tmp = lgdp[1:(n-11+i)]
+  xreg.tmp = Xreg[1:(n-11+i),]
+  # fit model
+  out.tmp = Arima( lgdp.tmp, order = c(0,1,0), xreg = xreg.tmp, include.drift = T )
+  # 
+  CV.fit[i] = forecast( out.tmp, xreg = t( Xreg[n-10+i,] ) )$mean
+}
+
+actual = gdp[(n-9):n]
+mean( abs( actual - exp(CV.fit) ) / actual )
+```
+
+
+The Cross-Validation MAPE is 9.68%. Below is a plot of the (un-transformed) actual data and cross-validated predictions.
+
+```{r}
+plot( exp(CV.fit), col = 2, type = "o", pch = 20); lines( actual, type = "o", pch = 20);
+legend("topleft", col = 1:2, legend = c("actual", "CV"), pch = 16)
+```
+
+
+
+
